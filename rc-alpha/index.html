@@ -771,6 +771,7 @@ function setupOwosKeyListener(){
       if(!_owosKeyEnabled)return;
       if(_owosKeyAction==='siriish')openSiriish();
       else if(_owosKeyAction==='drawer')toggleDrawer();
+      else if(_owosKeyAction==='cards'){ if(cardsEnabled&&cardIds().length)showCardsOverview(); }
       else openApp(_owosKeyAction);
     }
   });
@@ -833,6 +834,7 @@ var _owosKeyAction='siriish'; // 'siriish' | 'drawer' | app id
 var OWOS_KEY_ACTIONS=[
   {id:'siriish',  label:'Open Siri-ish',    icon:'🔮', note:'Opens the Siri-ish assistant overlay'},
   {id:'drawer',   label:'Open Apps Menu',   icon:'⊞',  note:'Opens the App Drawer'},
+  {id:'cards',    label:'Open Cards Overview', icon:'🗂️', note:'Shows the Cards Overview (open apps)'},
   {id:'browser',  label:'Open Browser',     icon:'🌐', note:'Launches the Browser app'},
   {id:'calc',     label:'Open Calculator',  icon:'🧮', note:'Launches the Calculator app'},
   {id:'terminal', label:'Open Terminal',    icon:'💻', note:'Launches the Terminal app'},
@@ -1276,7 +1278,9 @@ function renameFolder(folderId){
 }
 
 // ── Window management ─────────────────────────────────────
-var cardsOverview=false,_cardsActiveId=null,_cardsGesture=null,_cardsGestureBound=false,_cardsWheel={x:0,y:0,t:null},_cardsIgnoreWheelUntil=0,_cardsSuppressClickUntil=0,_cardsCloseUntil=0;
+var cardsOverview=false,_cardsActiveId=null,_cardsGesture=null,_cardsGestureBound=false,_cardsWheel={x:0,y:0,t:null},_cardsWheelOpen={y:0,t:null,last:0},_cardsIgnoreWheelUntil=0,_cardsSuppressClickUntil=0,_cardsCloseUntil=0;
+var _cardsOpenEdgeW=110; // px from left/right edge to allow opening overview
+var _cardsOpenEdgeH=110; // px from bottom edge to allow opening overview
 function cardIds(){return Object.keys(openApps).filter(function(id){return document.getElementById('card-'+id);});}
 function syncCardModeState(){
   var ids=cardIds();
@@ -1350,21 +1354,83 @@ function closeActiveCard(){
   _cardsWheel.x=0;_cardsWheel.y=0;
   closeApp(id);
 }
+function _cardsScrollableAncestor(target){
+  if(!target||!target.closest)return null;
+  // App content is intentionally scrollable; gestures/wheel inside it should scroll, not open overview.
+  var el=target.closest('.card-body,[data-scrollable="1"]');
+  if(!el)return null;
+  var cs=getComputedStyle(el);
+  var canY=(cs.overflowY==='auto'||cs.overflowY==='scroll');
+  var canX=(cs.overflowX==='auto'||cs.overflowX==='scroll');
+  if(!(canY||canX))return null;
+  return el;
+}
+function _cardsCanScroll(el,dx,dy){
+  if(!el)return false;
+  // If there is room to scroll in the direction of the gesture, let it pass through.
+  if(dy){
+    if(el.scrollHeight>el.clientHeight+1){
+      if(dy<0&&el.scrollTop>0)return true;
+      if(dy>0&&(el.scrollTop+el.clientHeight)<(el.scrollHeight-1))return true;
+    }
+  }
+  if(dx){
+    if(el.scrollWidth>el.clientWidth+1){
+      if(dx<0&&el.scrollLeft>0)return true;
+      if(dx>0&&(el.scrollLeft+el.clientWidth)<(el.scrollWidth-1))return true;
+    }
+  }
+  return false;
+}
 function handleCardsWheel(e){
   if(!cardsEnabled||!cardIds().length)return;
   if(Math.abs(e.deltaX)<18&&Math.abs(e.deltaY)<18)return;
+  var sc=_cardsScrollableAncestor(e.target);
+  if(sc&&_cardsCanScroll(sc,e.deltaX,e.deltaY))return;
+  // Activate overview via a deliberate trackpad "swipe up" (wheel event), but avoid accidental mouse-wheel triggers.
+  if(!cardsOverview){
+    // On macOS with "natural scrolling", two-finger swipe UP commonly yields positive deltaY.
+    // We treat swipe-up as deltaY > 0 here.
+    if(e.deltaY<=0)return;
+    // Heuristic: ignore coarse wheel events (often a physical mouse wheel).
+    // Trackpads tend to emit many small deltas with deltaMode 0.
+    if(e.deltaMode!==0)return;
+    if(Math.abs(e.deltaY)>120)return;
+    // Require gesture to start in bottom-left or bottom-right corner.
+    var cx=typeof e.clientX==='number'?e.clientX:null;
+    var cy=typeof e.clientY==='number'?e.clientY:null;
+    if(cx===null||cy===null)return;
+    var inBottom=cy>=(window.innerHeight-_cardsOpenEdgeH);
+    var inLeft=cx<=_cardsOpenEdgeW;
+    var inRight=cx>=(window.innerWidth-_cardsOpenEdgeW);
+    if(!(inBottom&&(inLeft||inRight)))return;
+    // Normalize wheel deltaY and accumulate briefly to avoid accidental triggers.
+    var my=1;
+    if(e.deltaMode===1)my=16;
+    else if(e.deltaMode===2)my=window.innerHeight;
+    var now=Date.now();
+    if(now-_cardsWheelOpen.last>360)_cardsWheelOpen.y=0;
+    _cardsWheelOpen.last=now;
+    _cardsWheelOpen.y+=(e.deltaY*my);
+    clearTimeout(_cardsWheelOpen.t);
+    _cardsWheelOpen.t=setTimeout(function(){_cardsWheelOpen.y=0;},300);
+    if(_cardsWheelOpen.y>180){
+      e.preventDefault();
+      _cardsWheelOpen.y=0;
+      showCardsOverview();
+    }
+    return;
+  }
   if(Date.now()<_cardsIgnoreWheelUntil||Date.now()<_cardsCloseUntil){e.preventDefault();return;}
-  _cardsWheel.x+=e.deltaX;_cardsWheel.y+=e.deltaY;
+  // Normalize wheel a bit so trackpads don't trigger overview too easily.
+  var mx=1,my=1;
+  if(e.deltaMode===1){mx=my=16;}
+  else if(e.deltaMode===2){mx=my=window.innerHeight;}
+  _cardsWheel.x+=e.deltaX*mx;_cardsWheel.y+=e.deltaY*my;
   clearTimeout(_cardsWheel.t);
   _cardsWheel.t=setTimeout(function(){_cardsWheel.x=0;_cardsWheel.y=0;},180);
   var ax=Math.abs(_cardsWheel.x),ay=Math.abs(_cardsWheel.y);
-  if(!cardsOverview&&ay>70){
-    e.preventDefault();
-    _cardsWheel.x=0;_cardsWheel.y=0;
-    showCardsOverview();
-    return;
-  }
-  if(cardsOverview&&Math.max(ax,ay)>70){
+  if(cardsOverview&&Math.max(ax,ay)>120){
     e.preventDefault();
     if(ax>ay)moveActiveCard(_cardsWheel.x>0?1:-1);
     else closeActiveCard();
@@ -1376,6 +1442,9 @@ function attachCardGesture(card){
   card.dataset.gestureReady='1';
   card.addEventListener('pointerdown',function(e){
     if(!cardsEnabled)return;
+    // If the user starts a gesture inside scrollable app content, treat it as scrolling, not card gestures.
+    var sc=_cardsScrollableAncestor(e.target);
+    if(sc&&!cardsOverview)return;
     var interactive=e.target.closest('input,textarea,select,button,a,[contenteditable="true"],iframe');
     if(interactive&&!cardsOverview)return;
     _cardsGesture={id:card.dataset.appId,sx:e.clientX,sy:e.clientY,dx:0,dy:0,t:Date.now(),moved:false};
@@ -1397,7 +1466,8 @@ function handleCardGesture(card,e){
   var ax=Math.abs(g.dx),ay=Math.abs(g.dy);
   if(Math.max(ax,ay)<45)return;
   if(ay>ax){
-    if(!cardsOverview){showCardsOverview();return;}
+    // Overview activation is swipe-up-from-bottom only (handled at desktop layer).
+    if(!cardsOverview)return;
     if(Date.now()<_cardsCloseUntil)return;
     _cardsActiveId=card.dataset.appId;_cardsSuppressClickUntil=Date.now()+300;closeActiveCard();return;
   }else if(cardsOverview&&ax>45){
@@ -1410,10 +1480,22 @@ function setupCardsGestureLayer(){
   _cardsGestureBound=true;
   var desktop=document.getElementById('desktop');if(!desktop)return;
   var start=null;
-  desktop.addEventListener('pointerdown',function(e){if(!cardsEnabled)return;start={x:e.clientX,y:e.clientY,target:e.target};});
+  desktop.addEventListener('pointerdown',function(e){
+    if(!cardsEnabled)return;
+    // Ignore pointer gestures that start in scrollable app content (these are normal scrolls).
+    if(_cardsScrollableAncestor(e.target))return;
+    // Start must be in bottom-left or bottom-right corner.
+    var inBottom=e.clientY>=(window.innerHeight-_cardsOpenEdgeH);
+    var inLeft=e.clientX<=_cardsOpenEdgeW;
+    var inRight=e.clientX>=(window.innerWidth-_cardsOpenEdgeW);
+    if(!(inBottom&&(inLeft||inRight)))return;
+    start={x:e.clientX,y:e.clientY,target:e.target};
+  });
   desktop.addEventListener('pointerup',function(e){
     if(!start||!cardsEnabled)return;
-    var dy=e.clientY-start.y,dx=e.clientX-start.x;start=null;
+    var s=start;
+    var dy=e.clientY-s.y,dx=e.clientX-s.x;start=null;
+    if(_cardsScrollableAncestor(e.target))return;
     var ax=Math.abs(dx),ay=Math.abs(dy);
     if(cardsOverview&&Math.max(ax,ay)>55){
       if(ax>ay)moveActiveCard(dx<0?1:-1);
@@ -1421,14 +1503,16 @@ function setupCardsGestureLayer(){
       _cardsSuppressClickUntil=Date.now()+300;
       return;
     }
-    if(!cardsOverview&&ay>55)showCardsOverview();
+    // Activate overview via swipe up (touch/pen/mouse drag), except inside scrollable app content.
+    if(!cardsOverview&&dy<-45&&ay>ax)showCardsOverview();
   });
   desktop.addEventListener('click',function(e){
     if(!cardsEnabled||!cardsOverview||Date.now()<_cardsSuppressClickUntil)return;
     var card=e.target.closest('.app-card');
     exitCardsOverview(card?card.dataset.appId:null);
   });
-  desktop.addEventListener('wheel',handleCardsWheel,{passive:false});
+  // Use window so wheel works even though #desktop uses pointer-events:none.
+  window.addEventListener('wheel',handleCardsWheel,{passive:false,capture:true});
   window.addEventListener('resize',layoutCardOverview);
 }
 function makeDraggable(card){
@@ -3358,3 +3442,4 @@ function fetchWeatherWidget(){
 </script>
 </body>
 </html>
+
